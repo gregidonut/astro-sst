@@ -35,14 +35,20 @@
     }
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "bun test"
   },
   "dependencies": {
     "set-cookie-parser": "^2.7.1"
   },
+  "peerDependencies": {
+    "astro": "^7.0.0"
+  },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.146",
     "@types/set-cookie-parser": "^2.4.10",
-    "astro": "^5.0.8"
+    "astro": "^7.3.6",
+    "typescript": "^5"
   }
 }

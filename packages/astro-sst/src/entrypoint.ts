@@ -1,183 +1,108 @@
 import fs from "fs/promises";
-import type { SSRManifest } from "astro";
+import path from "path";
+import { fileURLToPath } from "url";
 import type {
   APIGatewayProxyEventV2,
   CloudFrontRequestEvent,
-  Callback,
-  Context,
 } from "aws-lambda";
-import { NodeApp, applyPolyfills } from "astro/app/node";
-import type { IntegrationConfig } from "./lib/build-meta";
-import { InternalEvent, convertFrom, convertTo } from "./lib/event-mapper.js";
+import { createApp } from "astro/app/entrypoint";
+import { responseMode } from "virtual:astro-sst:config";
+import {
+  type InternalEvent,
+  convertFrom,
+  convertTo,
+} from "./lib/event-mapper.js";
 import { debug } from "./lib/logger.js";
-import { ResponseStream } from "./lib/types";
+import type { ResponseStream } from "./lib/types.js";
 
-type RequestHandler = (
-  event: APIGatewayProxyEventV2,
-  streamResponse: ResponseStream,
-  context?: Context,
-  callback?: Callback
-) => void | Promise<void>;
-
-applyPolyfills();
-
-declare global {
-  const awslambda: {
-    streamifyResponse(handler: RequestHandler): RequestHandler;
-    HttpResponseStream: {
-      from(
-        underlyingStream: ResponseStream,
-        metadata: {
-          statusCode: number;
-          headers?: Record<string, string>;
-        }
-      ): ResponseStream;
-    };
-  };
-}
+const serverDir = path.dirname(fileURLToPath(import.meta.url));
+const streaming = responseMode === "stream";
+const app = createApp({ streaming });
 
 function createRequest(internalEvent: InternalEvent) {
-  const requestUrl = internalEvent.url;
   const requestProps = {
     method: internalEvent.method,
     headers: internalEvent.headers,
     body: ["GET", "HEAD"].includes(internalEvent.method)
       ? undefined
-      : internalEvent.body,
+      : new Uint8Array(internalEvent.body),
   };
-  return new Request(requestUrl, requestProps);
+  return new Request(internalEvent.url, requestProps);
 }
 
-export function createExports(
-  manifest: SSRManifest,
-  { responseMode }: IntegrationConfig
-) {
-  debug("handlerInit", responseMode);
-
-  const isStreaming = responseMode === "stream";
-  const app = new NodeApp(manifest);
-
-  function build404Url(url: string) {
-    const url404 = new URL(url);
-    url404.pathname = "/404";
-    url404.search = "";
-    url404.hash = "";
-    return url404.toString();
-  }
-
-  async function streamHandler(
-    event: APIGatewayProxyEventV2,
-    responseStream: ResponseStream
-  ) {
-    debug("event", event);
-
-    const internalEvent = convertFrom(event);
-    let request = createRequest(internalEvent);
-    let routeData = app.match(request);
-    if (!routeData) {
-      // handle prerendered 404
-      if (await existsAsync("404.html")) {
-        return streamError(
-          404,
-          await fs.readFile("404.html", "utf-8"),
-          responseStream
-        );
-      }
-
-      // handle server-side 404
-      request = createRequest({
-        ...internalEvent,
-        url: build404Url(internalEvent.url),
-      });
-      routeData = app.match(request);
-      if (!routeData) {
-        return streamError(404, "Not found", responseStream);
-      }
-    }
-
-    const response = await app.render(request, {
-      routeData,
-      clientAddress:
-        internalEvent.headers["x-forwarded-for"] || internalEvent.remoteAddress,
+async function prerenderedErrorPageFetch(url: string): Promise<Response> {
+  const { pathname } = new URL(url);
+  const status = pathname.includes("/500") ? 500 : 404;
+  const filename = status === 500 ? "500.html" : "404.html";
+  try {
+    const html = await fs.readFile(path.join(serverDir, filename), "utf-8");
+    return new Response(html, {
+      status,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
     });
+  } catch {
+    return new Response(status === 500 ? "Internal Server Error" : "Not found", {
+      status,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+}
 
-    // Stream response back to Cloudfront
+async function render(internalEvent: InternalEvent) {
+  return app.render(createRequest(internalEvent), {
+    clientAddress:
+      internalEvent.headers["x-forwarded-for"] || internalEvent.remoteAddress,
+    prerenderedErrorPageFetch,
+  });
+}
+
+async function streamHandler(
+  event: APIGatewayProxyEventV2,
+  responseStream: ResponseStream,
+) {
+  debug("event", event);
+  try {
+    const internalEvent = convertFrom(event);
+    const response = await render(internalEvent);
     const convertedResponse = await convertTo({
       type: internalEvent.type,
       response,
       responseStream,
       cookies: Array.from(app.setCookieHeaders(response)),
     });
-
     debug("response", convertedResponse);
+  } catch (error) {
+    streamError(
+      500,
+      error instanceof Error ? error : new Error(String(error)),
+      responseStream,
+    );
   }
-
-  async function bufferHandler(
-    event: APIGatewayProxyEventV2 | CloudFrontRequestEvent
-  ) {
-    debug("event", event);
-
-    const internalEvent = convertFrom(event);
-    let request = createRequest(internalEvent);
-    let routeData = app.match(request);
-    if (!routeData) {
-      // handle prerendered 404
-      if (await existsAsync("404.html")) {
-        return convertTo({
-          type: internalEvent.type,
-          response: new Response(await fs.readFile("404.html", "utf-8"), {
-            status: 404,
-            headers: {
-              "Content-Type": "text/html",
-            },
-          }),
-        });
-      }
-
-      // handle server-side 404
-      request = createRequest({
-        ...internalEvent,
-        url: build404Url(internalEvent.url),
-      });
-      routeData = app.match(request);
-      if (!routeData) {
-        return convertTo({
-          type: internalEvent.type,
-          response: new Response("Not found", { status: 404 }),
-        });
-      }
-    }
-
-    // Process request
-    const response = await app.render(request, {
-      routeData,
-      clientAddress:
-        internalEvent.headers["x-forwarded-for"] || internalEvent.remoteAddress,
-    });
-
-    // Buffer response back to Cloudfront
-    const convertedResponse = await convertTo({
-      type: internalEvent.type,
-      response,
-      cookies: Array.from(app.setCookieHeaders(response)),
-    });
-
-    debug("response", convertedResponse);
-    return convertedResponse;
-  }
-
-  return {
-    // https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html
-    handler: isStreaming
-      ? awslambda.streamifyResponse(streamHandler)
-      : bufferHandler,
-  };
 }
+
+async function bufferHandler(
+  event: APIGatewayProxyEventV2 | CloudFrontRequestEvent,
+) {
+  debug("event", event);
+  const internalEvent = convertFrom(event);
+  const response = await render(internalEvent);
+  const convertedResponse = await convertTo({
+    type: internalEvent.type,
+    response,
+    cookies: Array.from(app.setCookieHeaders(response)),
+  });
+  debug("response", convertedResponse);
+  return convertedResponse;
+}
+
+export const handler = streaming
+  ? awslambda.streamifyResponse(streamHandler)
+  : bufferHandler;
 
 export function streamError(
   statusCode: number,
   error: string | Error,
-  responseStream: ResponseStream
+  responseStream: ResponseStream,
 ) {
   console.error(error);
 
@@ -190,11 +115,4 @@ export function streamError(
 
   responseStream.write(error.toString());
   responseStream.end();
-}
-
-async function existsAsync(input: string) {
-  return fs
-    .access(input)
-    .then(() => true)
-    .catch(() => false);
 }

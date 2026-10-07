@@ -12,7 +12,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const BUILD_META_FILE_NAME = "sst.buildMeta.json";
 
-type ResponseMode = "stream" | "buffer";
+export type ResponseMode = "stream" | "buffer";
 
 export type BuildMetaConfig = {
   astroVersion: string;
@@ -75,30 +75,20 @@ export class BuildMeta {
     // ie. redirecting to Astro's 404 page when API returns a 404 response does not
     // make sense.
     //
-    // So here is what we do when a request comes in for an invalid route ie. /garbage:
-    // - Case 1: static (no server)
-    //   => CF function S3 look up will fail, and uri will be rewritten to /404.html
-    // - Case 2: prerendered (has server)
-    //   => CF function S3 look up will fail, and request will be sent to the server
-    //      function. Server fails to serve /garbage, and cannot find the route. Server
-    //      tries to serve /404, and cannot find the route. Server finally serves the
-    //      404.html file manually bundled into it.
-    //   => that's why we copy 404.html into the server output
-    // - Case 3: SSR (has server)
-    //   => In CF function S3 look up will fail, and request is sent to the server
-    //      function. Server fails to serve /garbage, and cannot find the route. Server
-    //      tries to serve /404, and cannot find the route. Server finally serves the
-    //      404.html file manually bundled into it.
+    // Unmatched requests are rendered by Astro, including src/fetch.ts when present.
+    // If that pipeline needs a prerendered error page, the Lambda reads 404.html or
+    // 500.html from the server bundle. Copy those files next to the server entry.
 
     if (this.buildOutput !== "server") return;
 
-    try {
-      await copyFile(
-        path.join(fileURLToPath(this.astroConfig.build.client), "404.html"),
-        path.join(fileURLToPath(this.astroConfig.build.server), "404.html")
-      );
-    } catch (error) {
-      // Silently ignore errors, as the 404 page might not exist
+    const clientDir = fileURLToPath(this.astroConfig.build.client);
+    const serverDir = fileURLToPath(this.astroConfig.build.server);
+    for (const page of ["404.html", "500.html"]) {
+      try {
+        await copyFile(path.join(clientDir, page), path.join(serverDir, page));
+      } catch {
+        // The prerendered error page is optional.
+      }
     }
   }
 

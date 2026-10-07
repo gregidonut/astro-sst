@@ -1,21 +1,24 @@
 import type { AstroIntegration } from "astro";
-import { BuildMeta, IntegrationConfig } from "./lib/build-meta.js";
 import ASTRO_PACKAGE from "astro/package.json" with { type: "json" };
+import { BuildMeta, type IntegrationConfig, type ResponseMode } from "./lib/build-meta.js";
 import { debug } from "./lib/logger.js";
+import { responseModePlugin } from "./lib/response-mode-plugin.js";
 
 const PACKAGE_NAME = "astro-sst";
-const astroMajorVersion = parseInt(ASTRO_PACKAGE.version.split(".")[0] ?? 0);
+const astroMajorVersion = parseInt(ASTRO_PACKAGE.version.split(".")[0] ?? "0");
+
+export type { ResponseMode };
 
 export default function createIntegration(
   entrypointParameters: IntegrationConfig = {
     responseMode: "buffer",
-  }
+  },
 ): AstroIntegration {
   debug("astroVersion", ASTRO_PACKAGE.version);
 
-  if (astroMajorVersion < 5) {
+  if (astroMajorVersion < 7) {
     throw new Error(
-      "astro-sst requires Astro 5 or newer. Please upgrade your Astro app. Alternatively, use v2 of astro-sst by pinning to `astro-sst@two`."
+      "astro-sst requires Astro 7 or newer. Please upgrade your Astro app.",
     );
   }
 
@@ -35,7 +38,7 @@ export default function createIntegration(
             image: {
               remotePatterns: [
                 {
-                  protocol: siteUrl.protocol,
+                  protocol: siteUrl.protocol.slice(0, -1),
                   hostname: siteUrl.hostname,
                   port: siteUrl.port,
                   pathname: `${config.build.assets}/**`,
@@ -45,12 +48,12 @@ export default function createIntegration(
           });
         }
 
-        // Enable sourcemaps for SSR builds.
         updateConfig({
           vite: {
             build: {
               sourcemap: config.vite.build?.sourcemap ?? true,
             },
+            plugins: [responseModePlugin(entrypointParameters.responseMode)],
           },
         });
 
@@ -65,8 +68,7 @@ export default function createIntegration(
         setAdapter({
           name: PACKAGE_NAME,
           serverEntrypoint: `${PACKAGE_NAME}/entrypoint`,
-          args: { responseMode: entrypointParameters.responseMode },
-          exports: ["handler"],
+          entrypointResolution: "auto",
           adapterFeatures: {
             edgeMiddleware: false,
             buildOutput: buildOutput,

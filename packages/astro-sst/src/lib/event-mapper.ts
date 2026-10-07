@@ -7,7 +7,7 @@ import type {
   CloudFrontRequestResult,
   CloudFrontHeaders,
 } from "aws-lambda";
-import type { ResponseStream } from "./types";
+import type { ResponseStream } from "./types.js";
 import { splitCookiesString, parse, Cookie } from "set-cookie-parser";
 import { isBinaryContentType } from "./binary.js";
 import zlib from "zlib";
@@ -245,7 +245,7 @@ function convertToApigV2StreamingResult({
   responseStream,
   isBase64Encoded,
 }: InternalStreamingResult) {
-  if (!isBase64Encoded) {
+  if (!isBase64Encoded && body) {
     headers["content-encoding"] = "gzip";
   }
 
@@ -259,7 +259,8 @@ function convertToApigV2StreamingResult({
   responseStream = awslambda.HttpResponseStream.from(responseStream, metadata);
 
   if (!body) {
-    responseStream.write(0);
+    // Lambda only commits streamed status and headers after a write.
+    responseStream.write("");
     responseStream.end();
     return;
   }
